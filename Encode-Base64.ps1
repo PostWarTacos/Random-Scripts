@@ -21,3 +21,9 @@ $encodedCommand = [Convert]::ToBase64String($bytes)
 Write-Output $encodedCommand
 Write-Output $encodedCommand | Set-Clipboard  # Copies to clipboard
 Write-Host "Encoded Command has been copied to clipboard" -ForegroundColor Yellow
+
+# To decode the Base64 encoded script, you can use the following line:
+# [System.Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encodedScript))
+
+# To decode the Base64 encoded script and save it to a file:
+# [System.Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encodedScript)) | Out-File -FilePath "decoded-script.ps1" -Encoding UTF8

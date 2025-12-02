@@ -1,31 +1,22 @@
 <#
-AutoUpdate-All.ps1
+.SYNOPSIS
+    Automated system updater for Windows using package managers and Windows Update.
 
-Purpose:
-  - Run non-interactive, on-demand updates for applications and drivers on a Windows PC.
-  - Use common package managers (winget, chocolatey, scoop) where available.
-  - Run Windows Update (including drivers) via PSWindowsUpdate.
-  - Attempt BIOS update if a vendor CLI/tool is present. If not present, the script logs vendor support URLs for manual action.
+.DESCRIPTION
+    Non-interactive script that updates applications, PowerShell modules, and Windows.
+    Uses winget (primary) and chocolatey (fallback) package managers.
+    Requires Administrator privileges.
 
-Notes / Safety:
-  - The script requires Administrator privileges and will re-launch elevated if not run as admin.
-  - It runs non-interactively and will accept package agreements where the package managers support the flags.
-  - The script will perform an automatic reboot if updates require it (no input). Set the environment variable
-    AUTOUPDATE_DISABLE_REBOOT=1 before running to prevent auto reboot.
-
-Limitations:
-  - There's no universal, safe way to download and flash BIOS across all vendors. This script only automates BIOS
-    updates if the manufacturer's command-line tool is already installed on the system (example: Dell Command | Update).
-  - For other vendors, the script will provide links and a short instruction so you can update manually.
-
-Usage:
-  - Run with Administrator privileges. E.g. right-click -> Run with PowerShell or just double-click the script.
-  - The script runs with no interactive prompts.
-
+.NOTES
+    Author: PostWarTacos
+    Runs non-interactively with automatic package agreement acceptance.
+    Prompts for reboot if updates require it.
 #>
 
-Set-StrictMode -Version Latest
+#Requires -Version 5.0
+#Requires -RunAsAdministrator
 
+Set-StrictMode -Version Latest
 
 # --------------- Script Configuration --------------- #
 $Config = @{
@@ -35,7 +26,6 @@ $Config = @{
     # Update Settings
     WingetAcceptAgreements    = $true
     ChocolateyYesFlag         = $true
-    ScoopUpdateAll            = $true
     PSModuleUpdateForce       = $true
     
     # Reboot Settings
@@ -47,7 +37,6 @@ $Config = @{
 $script:UpdateResults = @{
     WingetSuccess = $false
     ChocolateySuccess = $false
-    ScoopSuccess = $false
     PSModulesSuccess = $false
     WindowsUpdateSuccess = $false
     RebootRequired = $false
@@ -58,60 +47,67 @@ $script:UpdateSummary = @()
 
 # --------------- Helper Functions --------------- #
 
+<#
+.SYNOPSIS
+    Writes formatted log messages with timestamps and color coding.
+    
+.DESCRIPTION
+    Provides standardized logging output with different severity levels.
+    Each message includes timestamp, level indicator, and appropriate console coloring.
+    
+.PARAMETER Level
+    Severity level: Info, Warning, Error, or Success
+    
+.PARAMETER Message
+    The message text to display and log
+#>
 Function Write-LogMessage {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)]
-        [ValidateSet("Info", "Warning", "Error", "Success")]
-        [string]$Level,
-        
-        [Parameter(Mandatory)]
+        [Parameter(Position=0, Mandatory)]
         [string]$Message,
-        
-        [string]$LogFile = $Config.LogFilePath 
+        [Parameter(Position=1)]
+        [ValidateSet("Info", "Warning", "Error", "Success", "Default")]
+        [string]$Level,
+        [string]$LogFile = $Config.LogFilePath
     )
     
+    # Generate timestamp for log entry
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $logEntry = "[$timestamp] [$Level] $Message"
     
-    # Console output with colors
+    # Add level-specific prefixes for visual identification    
+    if ($Level) {
+        $prefix = switch ($Level) {
+            "Info"    { "[*]" }     # Informational messages
+            "Warning" { "[!]" }     # Warning messages  
+            "Error"   { "[!!!]" }   # Error messages
+            "Success" { "[+]" }     # Success messages
+        }
+    }
+    else {
+        $prefix = "[*]" # Default prefix for unspecified level
+        $Level = "Default"
+    }
+
+    
+    $logEntry = "[$timestamp] $prefix $Message"
+
+    # Display console output with appropriate colors for each level (only when running interactively)
     switch ($Level) {
+        "Default" { Write-Host $logEntry -ForegroundColor DarkGray }
         "Info"    { Write-Host $logEntry -ForegroundColor White }
         "Warning" { Write-Host $logEntry -ForegroundColor Yellow }
         "Error"   { Write-Host $logEntry -ForegroundColor Red }
         "Success" { Write-Host $logEntry -ForegroundColor Green }
     }
     
-    # File output
+    # Write to log file if specified
     if ($LogFile) {
         try {
-            # Ensure log directory exists
-            $logDir = Split-Path -Path $LogFile -Parent
-            if (-not (Test-Path $logDir)) {
-                New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-            }
-            $logEntry | Out-File -FilePath $LogFile -Append -Encoding UTF8 -ErrorAction Stop
+            $logEntry | Out-File -FilePath $LogFile -Append -ErrorAction Stop
         } catch {
+            # Use Write-Warning to avoid recursion when logging fails
             Write-Warning "Failed to write to log file: $($_.Exception.Message)"
-        }
-    }
-}
-
-function Ensure-RunningAsAdmin {
-    $current = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = New-Object Security.Principal.WindowsPrincipal($current)
-    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        Write-LogMessage -Level "Info" -Message "Not running as administrator — relaunching elevated..."
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = (Get-Process -Id $PID).Path
-        $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
-        $psi.Verb = "runas"
-        try {
-            [System.Diagnostics.Process]::Start($psi) | Out-Null
-            exit 0
-        } catch {
-            Write-LogMessage -Level "Error" -Message "Elevation cancelled or failed. Exiting. $_"
-            exit 1
         }
     }
 }
@@ -172,7 +168,11 @@ function Update-Winget {
                 Write-LogMessage -Level "Info" -Message "Found $($availableUpdates.Count) updates available through winget. Updating..."
                 
                 # Run the actual updates
-                $updateOutput = & winget upgrade --all --silent --accept-source-agreements --accept-package-agreements 2>&1
+                $args = @('upgrade', '--all', '--silent')
+                if ($Config.WingetAcceptAgreements) {
+                    $args += @('--accept-source-agreements', '--accept-package-agreements')
+                }
+                $updateOutput = & winget @args 2>&1
                 $updateOutput | ForEach-Object { Write-LogMessage -Level "Info" -Message $_ }
                 
                 # Check if all updates completed successfully
@@ -251,7 +251,11 @@ function Update-Choco {
                 Write-LogMessage -Level "Info" -Message "Found $($outdatedPackages.Count) packages to update with Chocolatey. Updating..."
                 
                 # Run the actual updates
-                $updateOutput = & choco upgrade all -y --no-progress 2>&1
+                $args = @('upgrade', 'all', '--no-progress')
+                if ($Config.ChocolateyYesFlag) {
+                    $args += '-y'
+                }
+                $updateOutput = & choco @args 2>&1
                 $updateOutput | ForEach-Object { Write-LogMessage -Level "Info" -Message $_ }
                 
                 # Check if all updates completed successfully
@@ -281,87 +285,6 @@ function Update-Choco {
     return $chocoUpdatedEverything
 }
 
-function Update-Scoop {
-    param([bool]$RunOnlyIfNeeded = $false)
-    
-    if ($RunOnlyIfNeeded) {
-        Write-LogMessage -Level "Info" -Message "Previous package managers couldn't update everything, trying Scoop as final fallback..."
-    }
-    
-    $scoopAvailable = $false
-    $scoopUpdatedEverything = $false
-    
-    if (Test-Path "$env:USERPROFILE\scoop\shims\scoop.ps1" -PathType Leaf -ErrorAction SilentlyContinue -or (Get-Command scoop -ErrorAction SilentlyContinue)) {
-        $scoopAvailable = $true
-    } else {
-        Write-LogMessage -Level "Info" -Message "Scoop not found. Attempting to install Scoop..."
-        try {
-            # Install Scoop using the official installation script
-            Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
-            Invoke-RestMethod get.scoop.sh | Invoke-Expression
-            
-            # Refresh environment variables and try again
-            $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-            
-            # Check if scoop is now available
-            if (Test-Path "$env:USERPROFILE\scoop\shims\scoop.ps1" -PathType Leaf -ErrorAction SilentlyContinue -or (Get-Command scoop -ErrorAction SilentlyContinue)) {
-                $scoopAvailable = $true
-                Write-LogMessage -Level "Success" -Message "Scoop installed successfully"
-            } else {
-                Write-LogMessage -Level "Warning" -Message "Scoop still not available after installation attempt"
-                $script:UpdateSummary += "Scoop installation attempted but not available - skipped"
-            }
-        } catch {
-            Write-LogMessage -Level "Warning" -Message "Failed to install Scoop: $_"
-            $script:UpdateSummary += "Scoop not available and installation failed - skipped"
-            $script:UpdateErrors += "Scoop Installation: $_"
-        }
-    }
-    
-    if ($scoopAvailable) {
-        Write-LogMessage -Level "Info" -Message "Checking for available Scoop updates..."
-        try {
-            # First, update scoop itself and check for outdated packages
-            & scoop update 2>&1 | ForEach-Object { Write-LogMessage -Level "Info" -Message $_ }
-            
-            # Check what updates are available
-            $statusOutput = & scoop status 2>$null
-            $outdatedPackages = $statusOutput | Where-Object { $_ -match "outdated|newer version" -and $_ -notmatch "^Scoop" }
-            
-            if ($outdatedPackages -and $outdatedPackages.Count -gt 0) {
-                Write-LogMessage -Level "Info" -Message "Found updates available through Scoop. Updating..."
-                
-                # Run the actual updates
-                $updateOutput = & scoop update * 2>&1
-                $updateOutput | ForEach-Object { Write-LogMessage -Level "Info" -Message $_ }
-                
-                # Check if all updates completed successfully
-                $failedUpdates = $updateOutput | Where-Object { $_ -match "ERROR|WARN.*failed" }
-                if (-not $failedUpdates) {
-                    $scoopUpdatedEverything = $true
-                    $script:UpdateResults.ScoopSuccess = $true
-                    $script:UpdateSummary += "Scoop updates completed successfully - all packages updated"
-                } else {
-                    $script:UpdateResults.ScoopSuccess = $false
-                    $script:UpdateSummary += "Scoop updates completed with some failures"
-                    $script:UpdateErrors += "Scoop: Some updates failed"
-                }
-            } else {
-                Write-LogMessage -Level "Info" -Message "No updates available through Scoop"
-                $scoopUpdatedEverything = $true  # Nothing to update means "everything" is updated
-                $script:UpdateResults.ScoopSuccess = $true
-                $script:UpdateSummary += "Scoop: No updates needed"
-            }
-        } catch {
-            Write-LogMessage -Level "Warning" -Message "scoop update failed: $_"
-            $script:UpdateErrors += "Scoop: $_"
-            $script:UpdateResults.ScoopSuccess = $false
-        }
-    }
-    
-    return $scoopUpdatedEverything
-}
-
 function Update-PowerShellModules {
     Write-LogMessage -Level "Info" -Message "Updating installed PowerShell modules from PSGallery where possible..."
     try {
@@ -373,7 +296,14 @@ function Update-PowerShellModules {
         foreach ($m in $modules) {
             try {
                 Write-LogMessage -Level "Info" -Message "Updating module $($m.Name)"
-                Update-Module -Name $m.Name -Force -ErrorAction Stop
+                $updateArgs = @{
+                    Name = $m.Name
+                    ErrorAction = 'Stop'
+                }
+                if ($Config.PSModuleUpdateForce) {
+                    $updateArgs['Force'] = $true
+                }
+                Update-Module @updateArgs
                 $updatedCount++
             } catch {
                 Write-LogMessage -Level "Warning" -Message "Could not update module $($m.Name): $_"
@@ -457,8 +387,6 @@ function Test-PendingReboot {
 }
 
 function Main {
-    Ensure-RunningAsAdmin
-
     $startTime = Get-Date
     Write-LogMessage -Level "Info" -Message "AutoUpdate-All started at $startTime"
 
@@ -469,23 +397,14 @@ function Main {
     $wingetSuccess = Update-Winget
     
     # Only run Chocolatey if winget didn't update everything
-    $chocoSuccess = $true  # Default to true so we don't run Scoop unnecessarily
     if (-not $wingetSuccess) {
         $chocoSuccess = Update-Choco -RunOnlyIfNeeded $true
+        if (-not $chocoSuccess) {
+            Write-LogMessage -Level "Warning" -Message "Both package managers had issues - some packages may not be updated"
+        }
     } else {
         Write-LogMessage -Level "Info" -Message "Winget updated everything successfully - skipping Chocolatey"
         $script:UpdateSummary += "Chocolatey: Skipped (winget handled all updates)"
-    }
-    
-    # Only run Scoop if neither winget nor Chocolatey updated everything
-    if (-not $wingetSuccess -and -not $chocoSuccess) {
-        $scoopSuccess = Update-Scoop -RunOnlyIfNeeded $true
-        if (-not $scoopSuccess) {
-            Write-LogMessage -Level "Warning" -Message "All package managers had issues - some packages may not be updated"
-        }
-    } else {
-        Write-LogMessage -Level "Info" -Message "Previous package managers handled all updates - skipping Scoop"
-        $script:UpdateSummary += "Scoop: Skipped (previous package managers handled all updates)"
     }
     
     # Always update PowerShell modules (separate from package managers)

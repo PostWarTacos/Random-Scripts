@@ -303,11 +303,11 @@ function Get-DriveSpace {
 }
 
 # Main script execution
-Write-LogMessage "" -Level Info
+Write-LogMessage ""
 Write-LogMessage "========================================" -Level Info
 Write-LogMessage "Computer Inventory & Health Check" -Level Success
 Write-LogMessage "========================================" -Level Info
-Write-LogMessage "" -Level Info
+Write-LogMessage ""
 
 # Read computer list
 $computers = Get-Content $ComputerListPath | Where-Object { $_.Trim() -ne "" }
@@ -327,7 +327,7 @@ $results = foreach ($computer in $computers) {
     $computerName = $computer.Trim()
     $processedCount++
     
-    Write-LogMessage "" -Level Info
+    Write-LogMessage ""
     Write-LogMessage "[$processedCount/$($computers.Count)] Processing: $computerName" -Level Info
     
     # Initialize result object with defaults
@@ -427,24 +427,24 @@ $results = foreach ($computer in $computers) {
 }
 
 # Export to CSV
-Write-LogMessage "" -Level Info
+Write-LogMessage ""
 Write-LogMessage "========================================" -Level Info
 Write-LogMessage "Exporting results to CSV..." -Level Info
 $results | Export-Csv -Path $csvFile -NoTypeInformation -Force
 
 # Display summary
-Write-LogMessage "" -Level Info
+Write-LogMessage ""
 Write-LogMessage "========================================" -Level Info
 Write-LogMessage "SUMMARY" -Level Success
 Write-LogMessage "========================================" -Level Info
 Write-LogMessage "Total Computers:  $processedCount" -Level Info
 Write-LogMessage "Online:           $onlineCount" -Level Success
 Write-LogMessage "Offline:          $offlineCount" -Level Warning
-Write-LogMessage "" -Level Info
+Write-LogMessage ""
 Write-LogMessage "Results exported to:" -Level Info
 Write-LogMessage "$csvFile" -Level Info
 Write-LogMessage "========================================" -Level Info
-Write-LogMessage "" -Level Info
+Write-LogMessage ""
 
 # Return the results for pipeline use
 return $results

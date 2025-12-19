@@ -1,3 +1,5 @@
+Write-Host "Keep-Awake script is running. Press Ctrl+C to stop."
+
 # Prevent idle without affecting mouse or keyboard
 Add-Type -AssemblyName System.Windows.Forms
 

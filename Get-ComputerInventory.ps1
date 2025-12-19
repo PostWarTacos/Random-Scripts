@@ -302,6 +302,173 @@ function Get-DriveSpace {
     }
 }
 
+# Function to check for pending reboot
+function Get-PendingReboot {
+    param([string]$ComputerName)
+    
+    try {
+        $pendingReboot = $false
+        $reasons = @()
+        
+        # Check Component Based Servicing
+        $cbs = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
+            Test-Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
+        } -ErrorAction SilentlyContinue
+        
+        if ($cbs) {
+            $pendingReboot = $true
+            $reasons += "CBS"
+        }
+        
+        # Check Windows Update
+        $wu = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
+            Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"
+        } -ErrorAction SilentlyContinue
+        
+        if ($wu) {
+            $pendingReboot = $true
+            $reasons += "WindowsUpdate"
+        }
+        
+        # Check PendingFileRenameOperations
+        $pfro = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
+            $prop = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager" -Name PendingFileRenameOperations -ErrorAction SilentlyContinue
+            return ($null -ne $prop -and $prop.PendingFileRenameOperations)
+        } -ErrorAction SilentlyContinue
+        
+        if ($pfro) {
+            $pendingReboot = $true
+            $reasons += "FileRename"
+        }
+        
+        # Check SCCM Client
+        $sccm = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
+            try {
+                $ccmClientSDK = Invoke-CimMethod -Namespace "root\ccm\ClientSDK" -ClassName CCM_ClientUtilities -MethodName DetermineIfRebootPending -ErrorAction Stop
+                return ($ccmClientSDK.RebootPending -or $ccmClientSDK.IsHardRebootPending)
+            } catch {
+                return $false
+            }
+        } -ErrorAction SilentlyContinue
+        
+        if ($sccm) {
+            $pendingReboot = $true
+            $reasons += "SCCM"
+        }
+        
+        if ($pendingReboot) {
+            return "Yes ($($reasons -join ', '))"
+        } else {
+            return "No"
+        }
+    } catch {
+        return "ERROR: $($_.Exception.Message)"
+    }
+}
+
+# Function to check SCCM health
+function Get-SCCMHealth {
+    param([string]$ComputerName)
+    
+    try {
+        $result = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
+            $healthMessages = @()
+            
+            # Check if SCCM Client is installed
+            $clientPath = "C:\Windows\CCM\CcmExec.exe"
+            if (-not (Test-Path $clientPath)) {
+                $healthMessages += [PSCustomObject]@{Severity='Critical'; Message='CcmExec.exe missing.'; Priority=1}
+            }
+            
+            # Check if SCCM Client Service is running
+            try {
+                $service = Get-Service -Name CcmExec -ErrorAction Stop
+                if ($service.Status -ne 'Running') {
+                    $healthMessages += [PSCustomObject]@{Severity='Critical'; Message='CcmExec service stopped.'; Priority=2}
+                }
+            } catch {
+                $healthMessages += [PSCustomObject]@{Severity='Critical'; Message='CcmExec service missing.'; Priority=3}
+            }
+            
+            # Check Client Version
+            try {
+                $smsClient = Get-CimInstance -Namespace "root\ccm" -ClassName SMS_Client -ErrorAction Stop
+                if (-not $smsClient -or -not $smsClient.ClientVersion) {
+                    $healthMessages += [PSCustomObject]@{Severity='Warning'; Message='Client version not available.'; Priority=50}
+                }
+            } catch {
+                $healthMessages += [PSCustomObject]@{Severity='Warning'; Message='SMS_Client class inaccessible.'; Priority=51}
+            }
+            
+            # Check Site Code
+            try {
+                $mp = Get-CimInstance -Namespace "root\ccm" -ClassName SMS_Authority -ErrorAction Stop
+                if (-not $mp -or -not $mp.Name) {
+                    $healthMessages += [PSCustomObject]@{Severity='Critical'; Message='Site Code not available.'; Priority=4}
+                }
+            } catch {
+                $healthMessages += [PSCustomObject]@{Severity='Critical'; Message='SMS_Authority class inaccessible.'; Priority=5}
+            }
+            
+            # Check Client ID
+            try {
+                $ccmClient = Get-CimInstance -Namespace "root\ccm" -ClassName CCM_Client -ErrorAction Stop
+                if (-not $ccmClient -or -not $ccmClient.ClientId) {
+                    $healthMessages += [PSCustomObject]@{Severity='Critical'; Message='Client ID not available.'; Priority=6}
+                }
+            } catch {
+                $healthMessages += [PSCustomObject]@{Severity='Critical'; Message='CCM_Client class inaccessible.'; Priority=7}
+            }
+            
+            # Check ClientSDK namespace
+            try {
+                $clientSDKTest = Get-CimInstance -Namespace "root\ccm\ClientSDK" -ClassName CCM_Application -ErrorAction Stop | Select-Object -First 1
+                if (-not $clientSDKTest) {
+                    $healthMessages += [PSCustomObject]@{Severity='Critical'; Message='ClientSDK namespace empty.'; Priority=8}
+                }
+            } catch {
+                $healthMessages += [PSCustomObject]@{Severity='Critical'; Message='ClientSDK namespace corrupt.'; Priority=9}
+            }
+            
+            # Check Policy namespace
+            try {
+                $policyResult = Get-CimInstance -Namespace "root\ccm\Policy\Machine\ActualConfig" -ClassName CCM_TaskSequence -ErrorAction Stop
+                if (-not $policyResult -or $policyResult.Count -eq 0) {
+                    $healthMessages += [PSCustomObject]@{Severity='Critical'; Message='Policy namespace empty.'; Priority=10}
+                }
+            } catch {
+                $healthMessages += [PSCustomObject]@{Severity='Critical'; Message='Policy namespace corrupt.'; Priority=11}
+            }
+            
+            # Check Management Point
+            try {
+                $mp = Get-CimInstance -Namespace "root\ccm" -ClassName SMS_Authority -ErrorAction Stop
+                if (-not $mp -or -not $mp.CurrentManagementPoint) {
+                    $healthMessages += [PSCustomObject]@{Severity='Critical'; Message='Management Point not available.'; Priority=14}
+                }
+            } catch {
+                $healthMessages += [PSCustomObject]@{Severity='Critical'; Message='Management Point inaccessible.'; Priority=15}
+            }
+            
+            # Return results
+            if ($healthMessages.Count -eq 0) {
+                return "Healthy"
+            } elseif ($healthMessages.Count -eq 1) {
+                return "Corrupt Client: [$($healthMessages[0].Severity)] $($healthMessages[0].Message)"
+            } else {
+                $sortedMessages = $healthMessages | Sort-Object Priority, Severity, Message
+                $topError = $sortedMessages[0]
+                $additionalCount = $healthMessages.Count - 1
+                return "Corrupt Client: [$($topError.Severity)] $($topError.Message) (+ $additionalCount more issues)"
+            }
+        } -ErrorAction Stop
+        
+        return $result
+    } catch {
+        return "ERROR: $($_.Exception.Message)"
+    }
+}
+
 # Main script execution
 Write-LogMessage ""
 Write-LogMessage "========================================" -Level Info
@@ -316,6 +483,18 @@ Write-LogMessage "Results will be saved to: $csvFile" -Level Info
 
 # Check if host is domain-joined (for AD queries)
 $isDomainJoined = (Get-CimInstance -ClassName Win32_ComputerSystem).PartOfDomain
+
+# Check if host has SCCM (assume remote computers should have it too)
+$sccmInstalled = $false
+try {
+    $hostSite = Get-CimInstance -Namespace "root\ccm" -ClassName SMS_Authority -ErrorAction Stop
+    if ($hostSite -and $hostSite.Name) {
+        $sccmInstalled = $true
+        Write-LogMessage "Host SCCM site detected: $($hostSite.Name)" -Level Info
+    }
+} catch {
+    Write-LogMessage "No SCCM detected on host, skipping SCCM checks" -Level Info
+}
 
 # Initialize counters
 $processedCount = 0
@@ -341,6 +520,7 @@ $results = foreach ($computer in $computers) {
         Model = "N/A"
         SystemType = "N/A"
         SerialNumber = "N/A"
+        BIOSVersion = "N/A"
         OperatingSystem = "N/A"
         OSBuildVersion = "N/A"
         RAM = "N/A"
@@ -350,6 +530,8 @@ $results = foreach ($computer in $computers) {
         CurrentUser = "N/A"
         LastLoggedOnUser = "N/A"
         PrimaryUser = "N/A"
+        PendingReboot = "N/A"
+        SCCMHealth = "N/A"
         ADLastLogon = "N/A"
         Shares = "N/A"
         ErrorDetails = ""
@@ -376,6 +558,7 @@ $results = foreach ($computer in $computers) {
                 
                 # Populate result object
                 $result.SerialNumber = $bios.SerialNumber
+                $result.BIOSVersion = $bios.SMBIOSBIOSVersion
                 $result.Manufacturer = $hardware.Manufacturer
                 $result.Model = $hardware.Model
                 $result.SystemType = $hardware.SystemType
@@ -399,6 +582,18 @@ $results = foreach ($computer in $computers) {
                 # Get shares
                 Write-LogMessage "  Enumerating shares..." -Level Info
                 $result.Shares = Get-SharesInfo -ComputerName $computerName
+                
+                # Check pending reboot
+                Write-LogMessage "  Checking pending reboot status..." -Level Info
+                $result.PendingReboot = Get-PendingReboot -ComputerName $computerName
+                
+                # Check SCCM health (only if host has SCCM installed)
+                if ($sccmInstalled) {
+                    Write-LogMessage "  Checking SCCM health..." -Level Info
+                    $result.SCCMHealth = Get-SCCMHealth -ComputerName $computerName
+                } else {
+                    $result.SCCMHealth = "Not Installed"
+                }
                 
             } catch {
                 $result.ErrorDetails = "Data collection error: $($_.Exception.Message)"

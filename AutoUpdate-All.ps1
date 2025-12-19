@@ -335,6 +335,17 @@ function Install-And-Run-PSWindowsUpdate {
     
     # Run Windows Update including Microsoft Update (optional updates and drivers)
     try {
+        Write-LogMessage -Level "Info" -Message "Configuring Windows Update to defer feature updates (security updates only)..."
+        
+        # Set registry to defer feature updates for 365 days (only install security/quality updates)
+        $wuPolicyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+        if (-not (Test-Path $wuPolicyPath)) {
+            New-Item -Path $wuPolicyPath -Force | Out-Null
+        }
+        Set-ItemProperty -Path $wuPolicyPath -Name "DeferFeatureUpdates" -Value 1 -Type DWord -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $wuPolicyPath -Name "DeferFeatureUpdatesPeriodInDays" -Value 180 -Type DWord -ErrorAction SilentlyContinue
+        Write-LogMessage -Level "Success" -Message "Feature updates deferred - only security/quality updates will be installed"
+        
         Write-LogMessage -Level "Info" -Message "Running Windows Update (includes Microsoft Update catalog). This may take a long time..."
         # Install all available updates and include Microsoft Update catalog (3rd party driver updates).
         # IgnoreReboot so we can detect and reboot in our own controlled way below.

@@ -302,6 +302,173 @@ function Get-DriveSpace {
     }
 }
 
+# Function to determine chassis type (Laptop vs Desktop)
+function Get-ChassisType {
+    param([string]$ComputerName)
+    
+    try {
+        # Get chassis type from Win32_SystemEnclosure
+        $enclosure = Get-CimInstance -ClassName Win32_SystemEnclosure -ComputerName $ComputerName -ErrorAction Stop
+        
+        if ($enclosure -and $enclosure.ChassisTypes) {
+            # ChassisTypes is an array, get the first value
+            $chassisType = $enclosure.ChassisTypes[0]
+            
+            # Map chassis type codes to friendly names
+            # Reference: https://www.dmtf.org/sites/default/files/standards/documents/DSP0134_3.4.0.pdf
+            switch ($chassisType) {
+                {$_ -in 3, 4, 5, 6, 7, 15, 16} { return "Desktop" }      # Desktop, Low Profile Desktop, Pizza Box, Mini Tower, Tower, Space-saving, Mini
+                {$_ -in 8, 9, 10, 11, 12, 14, 18, 21} { return "Laptop" } # Portable, Laptop, Notebook, Hand Held, Docking Station, Sub Notebook, Tablet
+                13 { return "All-in-One" }                                  # All-in-One
+                17 { return "Server" }                                      # Main Server Chassis
+                {$_ -in 23, 24, 28, 29} { return "Server" }                # Rack Mount, Sealed-case PC, Blade, Blade Enclosure
+                30 { return "Tablet" }                                      # Tablet
+                31 { return "Convertible" }                                 # Convertible
+                32 { return "Detachable" }                                  # Detachable
+                default { return "Unknown ($chassisType)" }
+            }
+        }
+        
+        # Fallback: Check for battery presence
+        $battery = Get-CimInstance -ClassName Win32_Battery -ComputerName $ComputerName -ErrorAction SilentlyContinue
+        if ($battery) {
+            return "Laptop (Battery Detected)"
+        }
+        
+        return "Unknown"
+    } catch {
+        return "ERROR"
+    }
+}
+
+# Function to get TPM status
+function Get-TPMStatus {
+    param([string]$ComputerName)
+    
+    try {
+        $tpm = Get-CimInstance -Namespace "root\CIMv2\Security\MicrosoftTpm" -ClassName Win32_Tpm -ComputerName $ComputerName -ErrorAction Stop
+        
+        if ($tpm) {
+            $enabled = $tpm.IsEnabled_InitialValue
+            $activated = $tpm.IsActivated_InitialValue
+            $owned = $tpm.IsOwned_InitialValue
+            
+            if ($enabled -and $activated) {
+                return "Enabled & Activated"
+            } elseif ($enabled) {
+                return "Enabled Only"
+            } else {
+                return "Disabled"
+            }
+        } else {
+            return "Not Present"
+        }
+    } catch {
+        return "Not Available"
+    }
+}
+
+# Function to get BitLocker status
+function Get-BitLockerStatus {
+    param([string]$ComputerName)
+    
+    try {
+        $blv = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
+            try {
+                $vol = Get-BitLockerVolume -MountPoint "C:" -ErrorAction Stop
+                $status = $vol.ProtectionStatus
+                $method = ($vol.KeyProtector | Where-Object { $_.KeyProtectorType -ne 'RecoveryPassword' } | Select-Object -First 1).KeyProtectorType
+                
+                if ($status -eq 'On') {
+                    if ($method) {
+                        return "Encrypted ($method)"
+                    } else {
+                        return "Encrypted"
+                    }
+                } elseif ($status -eq 'Off') {
+                    return "Not Encrypted"
+                } else {
+                    return "Unknown"
+                }
+            } catch {
+                return "N/A"
+            }
+        } -ErrorAction Stop
+        
+        return $blv
+    } catch {
+        return "N/A"
+    }
+}
+
+# Function to get local administrators
+function Get-LocalAdmins {
+    param([string]$ComputerName)
+    
+    try {
+        $admins = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
+            try {
+                $group = Get-LocalGroup -Name "Administrators" -ErrorAction Stop
+                $members = Get-LocalGroupMember -Group $group -ErrorAction Stop
+                return ($members | ForEach-Object { $_.Name.Split('\\')[-1] }) -join "; "
+            } catch {
+                # Fallback to net localgroup for older systems
+                $output = net localgroup administrators
+                $members = $output | Where-Object { $_ -match '^[^-]' -and $_ -notmatch '^(Alias name|Comment|Members|The command completed)' -and $_.Trim() -ne '' }
+                return ($members | ForEach-Object { $_.Trim() }) -join "; "
+            }
+        } -ErrorAction Stop
+        
+        return $admins
+    } catch {
+        return "ERROR: $($_.Exception.Message)"
+    }
+}
+
+# Function to get last Windows Update
+function Get-LastWindowsUpdate {
+    param([string]$ComputerName)
+    
+    try {
+        $lastUpdate = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
+            try {
+                # Try using Windows Update COM object
+                $session = New-Object -ComObject Microsoft.Update.Session
+                $searcher = $session.CreateUpdateSearcher()
+                $historyCount = $searcher.GetTotalHistoryCount()
+                
+                if ($historyCount -gt 0) {
+                    $history = $searcher.QueryHistory(0, 1) | Select-Object -First 1
+                    return $history.Date
+                } else {
+                    return $null
+                }
+            } catch {
+                # Fallback to checking CBS log file
+                try {
+                    $cbsLog = "C:\Windows\Logs\CBS\CBS.log"
+                    if (Test-Path $cbsLog) {
+                        $lastLine = Get-Content $cbsLog -Tail 100 | Where-Object { $_ -match 'Installed|Updated' } | Select-Object -Last 1
+                        if ($lastLine -match '(\d{4}-\d{2}-\d{2})') {
+                            return [DateTime]::Parse($matches[1])
+                        }
+                    }
+                } catch {}
+                
+                return $null
+            }
+        } -ErrorAction Stop
+        
+        if ($lastUpdate) {
+            return $lastUpdate.ToString("yyyy-MM-dd")
+        } else {
+            return "Unknown"
+        }
+    } catch {
+        return "ERROR"
+    }
+}
+
 # Function to check for pending reboot
 function Get-PendingReboot {
     param([string]$ComputerName)
@@ -518,7 +685,8 @@ $results = foreach ($computer in $computers) {
         MACAddress = "N/A"
         Manufacturer = "N/A"
         Model = "N/A"
-        SystemType = "N/A"
+        Architecture = "N/A"
+        ChassisType = "N/A"
         SerialNumber = "N/A"
         BIOSVersion = "N/A"
         OperatingSystem = "N/A"
@@ -526,7 +694,11 @@ $results = foreach ($computer in $computers) {
         RAM = "N/A"
         CPUName = "N/A"
         DiskSpace = "N/A"
-        LastBootTime = "N/A"
+        Uptime = "N/A"
+        TPMStatus = "N/A"
+        BitLockerStatus = "N/A"
+        LocalAdmins = "N/A"
+        LastWindowsUpdate = "N/A"
         CurrentUser = "N/A"
         LastLoggedOnUser = "N/A"
         PrimaryUser = "N/A"
@@ -561,12 +733,17 @@ $results = foreach ($computer in $computers) {
                 $result.BIOSVersion = $bios.SMBIOSBIOSVersion
                 $result.Manufacturer = $hardware.Manufacturer
                 $result.Model = $hardware.Model
-                $result.SystemType = $hardware.SystemType
+                $result.Architecture = $hardware.SystemType
+                $result.ChassisType = Get-ChassisType -ComputerName $computerName
                 $result.OperatingSystem = $os.Caption
                 $result.OSBuildVersion = $os.Version
                 $result.RAM = [math]::Round($hardware.TotalPhysicalMemory / 1GB, 2)
                 $result.CPUName = $cpu.Name
-                $result.LastBootTime = $os.ConvertToDateTime($os.LastBootUpTime)
+                
+                # Calculate uptime
+                $lastBoot = $os.ConvertToDateTime($os.LastBootUpTime)
+                $uptime = (Get-Date) - $lastBoot
+                $result.Uptime = "$([math]::Floor($uptime.TotalDays)) days"
                 
                 if ($networks) {
                     $result.IPAddress = $networks[0].IPAddress[0]
@@ -578,6 +755,19 @@ $results = foreach ($computer in $computers) {
                 $result.CurrentUser = Get-CurrentUser -ComputerName $computerName
                 $result.LastLoggedOnUser = Get-LastLoggedOnUser -ComputerName $computerName
                 $result.PrimaryUser = Get-PrimaryUser -ComputerName $computerName
+                
+                # Get security and update information
+                Write-LogMessage "  Checking TPM status..." -Level Info
+                $result.TPMStatus = Get-TPMStatus -ComputerName $computerName
+                
+                Write-LogMessage "  Checking BitLocker status..." -Level Info
+                $result.BitLockerStatus = Get-BitLockerStatus -ComputerName $computerName
+                
+                Write-LogMessage "  Getting local administrators..." -Level Info
+                $result.LocalAdmins = Get-LocalAdmins -ComputerName $computerName
+                
+                Write-LogMessage "  Getting last Windows Update..." -Level Info
+                $result.LastWindowsUpdate = Get-LastWindowsUpdate -ComputerName $computerName
                 
                 # Get shares
                 Write-LogMessage "  Enumerating shares..." -Level Info

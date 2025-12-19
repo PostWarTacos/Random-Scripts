@@ -12,17 +12,11 @@
 .PARAMETER OutputPath
     Directory where output CSV will be saved. Defaults to user's Desktop.
 
-.PARAMETER IncludeShares
-    Switch to include network share enumeration in the output.
-
-.PARAMETER IncludeADInfo
-    Switch to include Active Directory last logon information.
-
 .EXAMPLE
     .\Get-ComputerInventory.ps1 -ComputerListPath "C:\computers.txt" -OutputPath "C:\Reports"
 
 .EXAMPLE
-    .\Get-ComputerInventory.ps1 -ComputerListPath "C:\computers.txt" -IncludeShares -IncludeADInfo | Export-Csv "C:\inventory.csv" -NoTypeInformation
+    .\Get-ComputerInventory.ps1 -ComputerListPath "C:\computers.txt" | Export-Csv "C:\inventory.csv" -NoTypeInformation
 
 .NOTES
     Author: Matthew T Wurtz
@@ -37,13 +31,7 @@ param(
     [string]$ComputerListPath,
     
     [Parameter(Mandatory=$false)]
-    [string]$OutputPath = "$env:USERPROFILE\Desktop",
-    
-    [Parameter(Mandatory=$false)]
-    [switch]$IncludeShares,
-    
-    [Parameter(Mandatory=$false)]
-    [switch]$IncludeADInfo
+    [string]$OutputPath = "$env:USERPROFILE\Desktop"
 )
 
 # Initialize variables
@@ -56,35 +44,54 @@ if (-not (Test-Path -Path $OutputPath)) {
 }
 
 # Function to write log messages with timestamp and color coding
-function Write-LogMessage {
+Function Write-LogMessage {
     [CmdletBinding()]
     param(
         [Parameter(Position=0, Mandatory)]
         [string]$Message,
         [Parameter(Position=1)]
         [ValidateSet("Info", "Warning", "Error", "Success", "Default")]
-        [string]$Level = "Info",
+        [string]$Level,
         [Parameter(Mandatory=$false)]
         [AllowNull()]
         [AllowEmptyString()]
         [string]$LogFile
     )
     
+    # If message is empty, just output a blank line
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        Write-Host ""
+        if ($LogFile) {
+            try {
+                "" | Out-File -FilePath $LogFile -Append -ErrorAction Stop
+            } catch {
+                Write-Warning "Failed to write to log file: $($_.Exception.Message)"
+            }
+        }
+        return
+    }
+    
     # Generate timestamp for log entry
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     
-    # Add level-specific prefixes for visual identification
-    $prefix = switch ($Level) {
-        "Info"    { "[*]" }     # Informational messages
-        "Warning" { "[!]" }     # Warning messages  
-        "Error"   { "[!!!]" }   # Error messages
-        "Success" { "[+]" }     # Success messages
-        "Default" { "[*]" }     # Default prefix
+    # Add level-specific prefixes for visual identification    
+    if ($Level) {
+        $prefix = switch ($Level) {
+            "Info"    { "[*]" }     # Informational messages
+            "Warning" { "[!]" }     # Warning messages  
+            "Error"   { "[!!!]" }   # Error messages
+            "Success" { "[+]" }     # Success messages
+        }
     }
+    else {
+        $prefix = "[*]" # Default prefix for unspecified level
+        $Level = "Default"
+    }
+
     
     $logEntry = "[$timestamp] $prefix $Message"
 
-    # Display console output with appropriate colors
+    # Display console output with appropriate colors for each level (only when running interactively)
     switch ($Level) {
         "Default" { Write-Host $logEntry -ForegroundColor DarkGray }
         "Info"    { Write-Host $logEntry -ForegroundColor White }
@@ -98,6 +105,7 @@ function Write-LogMessage {
         try {
             $logEntry | Out-File -FilePath $LogFile -Append -ErrorAction Stop
         } catch {
+            # Use Write-Warning to avoid recursion when logging fails
             Write-Warning "Failed to write to log file: $($_.Exception.Message)"
         }
     }
@@ -295,9 +303,11 @@ function Get-DriveSpace {
 }
 
 # Main script execution
-Write-Host "`n========================================" -ForegroundColor Cyan
-Write-Host "Computer Inventory & Health Check" -ForegroundColor Green
-Write-Host "========================================`n" -ForegroundColor Cyan
+Write-LogMessage "" -Level Info
+Write-LogMessage "========================================" -Level Info
+Write-LogMessage "Computer Inventory & Health Check" -Level Success
+Write-LogMessage "========================================" -Level Info
+Write-LogMessage "" -Level Info
 
 # Read computer list
 $computers = Get-Content $ComputerListPath | Where-Object { $_.Trim() -ne "" }
@@ -317,7 +327,8 @@ $results = foreach ($computer in $computers) {
     $computerName = $computer.Trim()
     $processedCount++
     
-    Write-Host "`n[$processedCount/$($computers.Count)] Processing: $computerName" -ForegroundColor White
+    Write-LogMessage "" -Level Info
+    Write-LogMessage "[$processedCount/$($computers.Count)] Processing: $computerName" -Level Info
     
     # Initialize result object with defaults
     $result = [PSCustomObject]@{
@@ -385,17 +396,9 @@ $results = foreach ($computer in $computers) {
                 $result.LastLoggedOnUser = Get-LastLoggedOnUser -ComputerName $computerName
                 $result.PrimaryUser = Get-PrimaryUser -ComputerName $computerName
                 
-                # Optional: Get shares
-                if ($IncludeShares) {
-                    Write-LogMessage "  Enumerating shares..." -Level Info
-                    $result.Shares = Get-SharesInfo -ComputerName $computerName
-                }
-                
-                # Optional: Get AD info
-                if ($IncludeADInfo -and $isDomainJoined) {
-                    Write-LogMessage "  Retrieving AD information..." -Level Info
-                    $result.ADLastLogon = Get-ADLastLogon -ComputerName $computerName
-                }
+                # Get shares
+                Write-LogMessage "  Enumerating shares..." -Level Info
+                $result.Shares = Get-SharesInfo -ComputerName $computerName
                 
             } catch {
                 $result.ErrorDetails = "Data collection error: $($_.Exception.Message)"
@@ -413,25 +416,35 @@ $results = foreach ($computer in $computers) {
         $offlineCount++
     }
     
+    # Get AD info if host is domain-joined (regardless of ping status)
+    if ($isDomainJoined) {
+        Write-LogMessage "  Retrieving AD information..." -Level Info
+        $result.ADLastLogon = Get-ADLastLogon -ComputerName $computerName
+    }
+    
     # Output the result object (will be collected in $results array)
     $result
 }
 
 # Export to CSV
-Write-Host "`n========================================" -ForegroundColor Cyan
+Write-LogMessage "" -Level Info
+Write-LogMessage "========================================" -Level Info
 Write-LogMessage "Exporting results to CSV..." -Level Info
 $results | Export-Csv -Path $csvFile -NoTypeInformation -Force
 
 # Display summary
-Write-Host "`n========================================" -ForegroundColor Cyan
-Write-Host "SUMMARY" -ForegroundColor Green
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "Total Computers:  $processedCount" -ForegroundColor White
-Write-Host "Online:           $onlineCount" -ForegroundColor Green
-Write-Host "Offline:          $offlineCount" -ForegroundColor Yellow
-Write-Host "`nResults exported to:" -ForegroundColor White
-Write-Host "$csvFile" -ForegroundColor Cyan
-Write-Host "========================================`n" -ForegroundColor Cyan
+Write-LogMessage "" -Level Info
+Write-LogMessage "========================================" -Level Info
+Write-LogMessage "SUMMARY" -Level Success
+Write-LogMessage "========================================" -Level Info
+Write-LogMessage "Total Computers:  $processedCount" -Level Info
+Write-LogMessage "Online:           $onlineCount" -Level Success
+Write-LogMessage "Offline:          $offlineCount" -Level Warning
+Write-LogMessage "" -Level Info
+Write-LogMessage "Results exported to:" -Level Info
+Write-LogMessage "$csvFile" -Level Info
+Write-LogMessage "========================================" -Level Info
+Write-LogMessage "" -Level Info
 
 # Return the results for pipeline use
 return $results

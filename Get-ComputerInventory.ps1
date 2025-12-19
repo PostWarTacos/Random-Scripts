@@ -149,9 +149,9 @@ function Get-ADLastLogon {
             $searcher.Filter = "(&(objectCategory=computer)(name=$ComputerName))"
             $searcher.PropertiesToLoad.Add("lastLogonTimeStamp") | Out-Null
             
-            $result = $searcher.FindOne()
-            if ($result -and $result.Properties["lastLogonTimeStamp"][0]) {
-                return [DateTime]::FromFileTime($result.Properties["lastLogonTimeStamp"][0])
+            $adSearchResult = $searcher.FindOne()
+            if ($adSearchResult -and $adSearchResult.Properties["lastLogonTimeStamp"][0]) {
+                return [DateTime]::FromFileTime($adSearchResult.Properties["lastLogonTimeStamp"][0])
             } else {
                 return "Never"
             }
@@ -307,37 +307,81 @@ function Get-ChassisType {
     param([string]$ComputerName)
     
     try {
-        # Get chassis type from Win32_SystemEnclosure
+        # Get system information for VM and chassis detection
+        $computer = Get-CimInstance -ClassName Win32_ComputerSystem -ComputerName $ComputerName -ErrorAction Stop
+        $bios = Get-CimInstance -ClassName Win32_BIOS -ComputerName $ComputerName -ErrorAction Stop
         $enclosure = Get-CimInstance -ClassName Win32_SystemEnclosure -ComputerName $ComputerName -ErrorAction Stop
         
+        # Detect if it's a VM
+        $isVM = $false
+        $vmType = ""
+        
+        # Check model and manufacturer for VM indicators
+        $model = $computer.Model.ToLower()
+        $manufacturer = $computer.Manufacturer.ToLower()
+        $biosManufacturer = $bios.Manufacturer.ToLower()
+        
+        if ($model -match 'virtual|vmware|vbox|kvm|xen|qemu') {
+            $isVM = $true
+            if ($model -match 'vmware') { $vmType = "VMware" }
+            elseif ($model -match 'virtual machine') { $vmType = "Hyper-V" }
+            elseif ($model -match 'vbox|virtualbox') { $vmType = "VirtualBox" }
+            elseif ($model -match 'kvm') { $vmType = "KVM" }
+            elseif ($model -match 'xen') { $vmType = "Xen" }
+            elseif ($model -match 'qemu') { $vmType = "QEMU" }
+            else { $vmType = "VM" }
+        } elseif ($manufacturer -match 'vmware|microsoft corporation' -or $biosManufacturer -match 'vmware|hyper-v|xen|qemu|innotek|parallels') {
+            $isVM = $true
+            if ($manufacturer -match 'vmware' -or $biosManufacturer -match 'vmware') { $vmType = "VMware" }
+            elseif ($biosManufacturer -match 'hyper-v' -or ($manufacturer -match 'microsoft' -and $model -match 'virtual')) { $vmType = "Hyper-V" }
+            elseif ($biosManufacturer -match 'innotek') { $vmType = "VirtualBox" }
+            elseif ($biosManufacturer -match 'xen') { $vmType = "Xen" }
+            elseif ($biosManufacturer -match 'qemu') { $vmType = "QEMU" }
+            elseif ($biosManufacturer -match 'parallels') { $vmType = "Parallels" }
+            else { $vmType = "VM" }
+        }
+        
+        # Determine chassis type
+        $chassisName = "Unknown"
         if ($enclosure -and $enclosure.ChassisTypes) {
             # ChassisTypes is an array, get the first value
             $chassisType = $enclosure.ChassisTypes[0]
             
             # Map chassis type codes to friendly names
             # Reference: https://www.dmtf.org/sites/default/files/standards/documents/DSP0134_3.4.0.pdf
-            switch ($chassisType) {
-                {$_ -in 3, 4, 5, 6, 7, 15, 16} { return "Desktop" }      # Desktop, Low Profile Desktop, Pizza Box, Mini Tower, Tower, Space-saving, Mini
-                {$_ -in 8, 9, 10, 11, 12, 14, 18, 21} { return "Laptop" } # Portable, Laptop, Notebook, Hand Held, Docking Station, Sub Notebook, Tablet
-                13 { return "All-in-One" }                                  # All-in-One
-                17 { return "Server" }                                      # Main Server Chassis
-                {$_ -in 23, 24, 28, 29} { return "Server" }                # Rack Mount, Sealed-case PC, Blade, Blade Enclosure
-                30 { return "Tablet" }                                      # Tablet
-                31 { return "Convertible" }                                 # Convertible
-                32 { return "Detachable" }                                  # Detachable
-                default { return "Unknown ($chassisType)" }
+            $chassisName = switch ($chassisType) {
+                {$_ -in 3, 4, 5, 6, 7, 15, 16} { "Desktop" }                # Desktop, Low Profile Desktop, Pizza Box, Mini Tower, Tower, Space-saving, Mini
+                {$_ -in 8, 9, 10, 11, 12, 14, 18, 21} { "Laptop" }         # Portable, Laptop, Notebook, Hand Held, Docking Station, Sub Notebook, Tablet
+                13 { "All-in-One" }                                          # All-in-One
+                17 { "Server (Tower)" }                                      # Main Server Chassis
+                23 { "Server (Rack)" }                                       # Rack Mount Chassis
+                24 { "Server (Sealed)" }                                     # Sealed-case PC
+                28 { "Server (Blade Enclosure)" }                            # Blade Enclosure
+                29 { "Server (Blade)" }                                      # Blade
+                30 { "Tablet" }                                              # Tablet
+                31 { "Convertible" }                                         # Convertible
+                32 { "Detachable" }                                          # Detachable
+                default { "Unknown ($chassisType)" }
             }
         }
         
-        # Fallback: Check for battery presence
-        $battery = Get-CimInstance -ClassName Win32_Battery -ComputerName $ComputerName -ErrorAction SilentlyContinue
-        if ($battery) {
-            return "Laptop (Battery Detected)"
+        # Fallback: Check for battery presence if chassis type is still unknown
+        if ($chassisName -eq "Unknown" -or $chassisName -match "Unknown \(\d+\)") {
+            $battery = Get-CimInstance -ClassName Win32_Battery -ComputerName $ComputerName -ErrorAction SilentlyContinue
+            if ($battery) {
+                $chassisName = "Laptop (Battery Detected)"
+            }
         }
         
-        return "Unknown"
+        # Return hashtable with ChassisType and VMType (only if VM)
+        $chassisResult = @{ ChassisType = $chassisName }
+        if ($isVM) {
+            $chassisResult.VMType = $vmType
+        }
+        return $chassisResult
+        
     } catch {
-        return "ERROR"
+        return @{ ChassisType = "ERROR" }
     }
 }
 
@@ -538,7 +582,7 @@ function Get-SCCMHealth {
     param([string]$ComputerName)
     
     try {
-        $result = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
+        $healthResult = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
             $healthMessages = @()
             
             # Check if SCCM Client is installed
@@ -630,7 +674,7 @@ function Get-SCCMHealth {
             }
         } -ErrorAction Stop
         
-        return $result
+        return $healthResult
     } catch {
         return "ERROR: $($_.Exception.Message)"
     }
@@ -687,6 +731,7 @@ $results = foreach ($computer in $computers) {
         Model = "N/A"
         Architecture = "N/A"
         ChassisType = "N/A"
+        VMType = "N/A"
         SerialNumber = "N/A"
         BIOSVersion = "N/A"
         OperatingSystem = "N/A"
@@ -727,6 +772,7 @@ $results = foreach ($computer in $computers) {
                 $cpu = Get-CimInstance -ClassName Win32_Processor -ComputerName $computerName -ErrorAction Stop | Select-Object -First 1
                 $networks = Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration -ComputerName $computerName -ErrorAction Stop |
                     Where-Object { $_.IPEnabled }
+                $chassisInfo = Get-ChassisType -ComputerName $computerName                    
                 
                 # Populate result object
                 $result.SerialNumber = $bios.SerialNumber
@@ -734,7 +780,7 @@ $results = foreach ($computer in $computers) {
                 $result.Manufacturer = $hardware.Manufacturer
                 $result.Model = $hardware.Model
                 $result.Architecture = $hardware.SystemType
-                $result.ChassisType = Get-ChassisType -ComputerName $computerName
+                $result.ChassisType = $chassisInfo.ChassisType
                 $result.OperatingSystem = $os.Caption
                 $result.OSBuildVersion = $os.Version
                 $result.RAM = [math]::Round($hardware.TotalPhysicalMemory / 1GB, 2)
@@ -755,6 +801,11 @@ $results = foreach ($computer in $computers) {
                 $result.CurrentUser = Get-CurrentUser -ComputerName $computerName
                 $result.LastLoggedOnUser = Get-LastLoggedOnUser -ComputerName $computerName
                 $result.PrimaryUser = Get-PrimaryUser -ComputerName $computerName
+                
+                # Get VM type if detected
+                if ($chassisInfo.ContainsKey('VMType')) {
+                    $result.VMType = $chassisInfo.VMType
+                }
                 
                 # Get security and update information
                 Write-LogMessage "  Checking TPM status..." -Level Info

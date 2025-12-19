@@ -343,7 +343,7 @@ $results = foreach ($computer in $computers) {
         SerialNumber = "N/A"
         OperatingSystem = "N/A"
         OSBuildVersion = "N/A"
-        TotalMemoryGB = "N/A"
+        RAM = "N/A"
         CPUName = "N/A"
         DiskSpace = "N/A"
         LastBootTime = "N/A"
@@ -381,7 +381,7 @@ $results = foreach ($computer in $computers) {
                 $result.SystemType = $hardware.SystemType
                 $result.OperatingSystem = $os.Caption
                 $result.OSBuildVersion = $os.Version
-                $result.TotalMemoryGB = [math]::Round($hardware.TotalPhysicalMemory / 1GB, 2)
+                $result.RAM = [math]::Round($hardware.TotalPhysicalMemory / 1GB, 2)
                 $result.CPUName = $cpu.Name
                 $result.LastBootTime = $os.ConvertToDateTime($os.LastBootUpTime)
                 
